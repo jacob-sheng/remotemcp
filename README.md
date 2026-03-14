@@ -1,51 +1,186 @@
-# Building a Remote MCP Server on Cloudflare (Without Auth)
+# Remote Network MCP on Cloudflare Workers
 
-This example allows you to deploy a remote MCP server that doesn't require authentication on Cloudflare Workers.
+This project deploys a remote MCP server on Cloudflare Workers and exposes a small network toolset over the `/mcp` endpoint.
 
-## Get started:
+## Warning
 
-[![Deploy to Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/cloudflare/ai/tree/main/demos/remote-mcp-authless)
+This server can fetch arbitrary public HTTP/HTTPS URLs, and its protection is currently just a shared static request header.
 
-This will deploy your MCP server to a URL like: `remote-mcp-server-authless.<your-account>.workers.dev/sse`
+That makes it convenient for testing, but it still behaves like a network proxy for anyone who knows the header value. Before exposing it broadly, you should add stronger authentication, rate limits, and ideally an allowlist.
 
-Alternatively, you can use the command line below to get the remote MCP Server created on your local machine:
+## Authentication
 
-```bash
-npm create cloudflare@latest -- my-mcp-server --template=cloudflare/ai/demos/remote-mcp-authless
+All real MCP requests to `/mcp` must include this exact request header:
+
+```text
+aayang: aayang
 ```
 
-## Customizing your MCP Server
+- `OPTIONS /mcp` preflight requests are allowed without the header
+- `GET / POST / DELETE /mcp` must include the header
+- If your MCP client or proxy cannot inject a custom request header, it cannot connect to this server
 
-To add your own [tools](https://developers.cloudflare.com/agents/model-context-protocol/tools/) to the MCP server, define each tool inside the `init()` method of `src/index.ts` using `this.server.tool(...)`.
+## Get Started
 
-## Connect to Cloudflare AI Playground
+Deploy from the template or run locally:
 
-You can connect to your MCP server from the Cloudflare AI Playground, which is a remote MCP client:
+```bash
+npm install
+npm run dev
+```
 
-1. Go to https://playground.ai.cloudflare.com/
-2. Enter your deployed MCP server URL (`remote-mcp-server-authless.<your-account>.workers.dev/sse`)
-3. You can now use your MCP tools directly from the playground!
+The local MCP endpoint is:
 
-## Connect Claude Desktop to your MCP server
+```text
+http://localhost:8787/mcp
+```
 
-You can also connect to your remote MCP server from local MCP clients, by using the [mcp-remote proxy](https://www.npmjs.com/package/mcp-remote).
+Your deployed endpoint will look like:
 
-To connect to your MCP server from Claude Desktop, follow [Anthropic's Quickstart](https://modelcontextprotocol.io/quickstart/user) and within Claude Desktop go to Settings > Developer > Edit Config.
+```text
+https://<your-worker>.<your-account>.workers.dev/mcp
+```
 
-Update with this configuration:
+Minimal HTTP example:
+
+```bash
+curl -i http://localhost:8787/mcp \
+  -X POST \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -H 'aayang: aayang' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1.0.0"}}}'
+```
+
+## Available MCP Tools
+
+### `fetch_url`
+
+General HTTP fetch tool for public URLs.
+
+- Supports `GET` and `POST`
+- Accepts optional headers
+- Accepts a string body or JSON object body for `POST`
+- Returns response metadata plus a response preview
+
+Example arguments:
+
+```json
+{
+	"url": "https://example.com",
+	"method": "GET",
+	"maxBytes": 262144,
+	"timeoutMs": 10000
+}
+```
+
+POST example:
+
+```json
+{
+	"url": "https://httpbin.org/post",
+	"method": "POST",
+	"headers": {
+		"content-type": "application/json",
+		"authorization": "Bearer <token>"
+	},
+	"body": {
+		"message": "hello"
+	}
+}
+```
+
+### `get_json`
+
+GET a public URL and force JSON parsing.
+
+- Best for JSON APIs
+- Returns `isError: true` if the response is not valid JSON
+- Includes structured metadata and a JSON preview
+
+Example arguments:
+
+```json
+{
+	"url": "https://api.github.com/repos/cloudflare/workers-sdk",
+	"headers": {
+		"accept": "application/vnd.github+json"
+	}
+}
+```
+
+### `head_url`
+
+Send a `HEAD` request without downloading the response body.
+
+- Returns status code
+- Returns redirect/final URL info
+- Returns headers such as `content-type`, `content-length`, `etag`, and `last-modified`
+
+Example arguments:
+
+```json
+{
+	"url": "https://example.com"
+}
+```
+
+### `extract_webpage`
+
+Fetch a page and return cleaned text.
+
+- HTML pages are cleaned with `HTMLRewriter`
+- Removes `script`, `style`, and `noscript`
+- Returns the page title and normalized text
+- Plain text responses are also supported
+
+Example arguments:
+
+```json
+{
+	"url": "https://developers.cloudflare.com/workers/",
+	"maxChars": 8000
+}
+```
+
+## Existing Example Tools
+
+The original sample tools are still available:
+
+- `add`
+- `calculate`
+
+## Connect from Cloudflare AI Playground
+
+1. Open <https://playground.ai.cloudflare.com/>
+2. Add your MCP server URL, for example `https://<your-worker>.<your-account>.workers.dev/mcp`
+3. Call the tools from the playground
+
+## Connect from Claude Desktop
+
+Use `mcp-remote` to bridge the remote MCP server:
 
 ```json
 {
 	"mcpServers": {
-		"calculator": {
+		"remote-network-mcp": {
 			"command": "npx",
 			"args": [
 				"mcp-remote",
-				"http://localhost:8787/sse" // or remote-mcp-server-authless.your-account.workers.dev/sse
+				"http://localhost:8787/mcp"
 			]
 		}
 	}
 }
 ```
 
-Restart Claude and you should see the tools become available.
+If your bridge or client supports custom headers, configure it to send `aayang: aayang` on every real MCP request. Then restart Claude Desktop.
+
+## Implementation Notes
+
+- Route: `/mcp`
+- Static auth header: `aayang: aayang`
+- Public URL schemes allowed: `http`, `https`
+- Obvious localhost/private IP targets are blocked
+- Hop-by-hop and proxy headers are stripped before outgoing requests
+- Response bodies are read with byte limits to avoid oversized MCP responses
